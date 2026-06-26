@@ -20,7 +20,7 @@ public class ChatbotController {
     public ResponseEntity<String> receberMensagem(@RequestBody MensagemRequest request) {
         // 1. Recebe o JSON do WhatsApp/Telegram
         // 2. Manda o texto para o Service processar
-        String respostaIA = chatbotService.processarMensagem(request.texto());
+        String respostaIA = chatbotService.processarMensagem(request.remetente(), request.texto());
 
         // 3. Retorna a resposta (depois faremos o envio ativo de volta pro usuário)
         return ResponseEntity.ok(respostaIA);

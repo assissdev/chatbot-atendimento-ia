@@ -9,6 +9,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class ChatbotService {
@@ -19,12 +20,19 @@ public class ChatbotService {
     @Value("${gemini.api.url}")
     private String apiUrl;
 
-    public String processarMensagem(String mensagemDoCliente) {
+    // Nossa memória de curto prazo (Fichário de clientes). Chave: Número, Valor: Histórico da conversa
+    private final Map<String, String> memoriaConversa = new ConcurrentHashMap<>();
+
+    // Atenção: Adicionei o parâmetro 'remetente' aqui!
+    public String processarMensagem(String remetente, String mensagemDoCliente) {
         RestTemplate restTemplate = new RestTemplate();
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
 
-        // Aqui nós programamos o comportamento e as regras da IA (Prompt Engineering)
+        // Resgata o histórico do cliente pelo número de telefone
+        String historicoAtual = memoriaConversa.getOrDefault(remetente, "Nenhuma interação anterior.");
+
+        // O seu prompt blindado continua igual
         String contextoDeNegocio = """
                 Você é o atendente de elite de um delivery de Pizza Frita em Vila Velha, ES.
                 Seu objetivo é conduzir o cliente até o fechamento do pedido de forma 100% automatizada.
@@ -46,26 +54,29 @@ public class ChatbotService {
                 - NUNCA avance um passo sem o cliente responder o anterior.
                 - NUNCA invente itens ou promoções. Venda apenas o que está no cardápio.
                 - Seja sempre curto e objetivo. Mensagens de WhatsApp não podem ser gigantes.
-                
-                Mensagem do cliente:\s
                 """;
 
-        String promptFinal = contextoDeNegocio + mensagemDoCliente;
+        // Aqui é a mágica da memória acontecendo: juntamos as regras, o passado e o presente
+        String promptFinal = contextoDeNegocio +
+                "\n\nHISTÓRICO DA CONVERSA:\n" + historicoAtual +
+                "\n\nCLIENTE AGORA DIZ: " + mensagemDoCliente +
+                "\nATENDENTE RESPONDERÁ:";
 
-        // O SEGREDO: Usando Map e List para o próprio Spring Boot montar o JSON de forma 100% segura
         Map<String, Object> part = Map.of("text", promptFinal);
         Map<String, Object> content = Map.of("parts", List.of(part));
         Map<String, Object> requestBodyMap = Map.of("contents", List.of(content));
 
-        // Enviando o Map seguro em vez da String manual
         HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBodyMap, headers);
 
         try {
-            // Disparando a requisição para a IA do Google
             Map<String, Object> response = restTemplate.postForObject(apiUrl + "?key=" + apiKey, request, Map.class);
+            String respostaDaIA = extrairTextoDaResposta(response);
 
-            // Extraindo apenas o texto da resposta do meio daquele JSON gigante que a API devolve
-            return extrairTextoDaResposta(response);
+            // Atualiza a ficha do cliente com essa nova troca de mensagens para a próxima rodada
+            String novoHistorico = historicoAtual + "\nCliente: " + mensagemDoCliente + "\nAtendente: " + respostaDaIA;
+            memoriaConversa.put(remetente, novoHistorico);
+
+            return respostaDaIA;
 
         } catch (Exception e) {
             System.err.println("Erro ao chamar o Gemini: " + e.getMessage());
