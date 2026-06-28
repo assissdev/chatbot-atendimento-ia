@@ -1,6 +1,6 @@
 package com.example.chatbot_atendimento_ia.controller;
 
-import com.example.chatbot_atendimento_ia.dto.MensagemRequest;
+import com.example.chatbot_atendimento_ia.dto.MetaWebhookRequest;
 import com.example.chatbot_atendimento_ia.service.ChatbotService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -11,40 +11,64 @@ public class ChatbotController {
 
     private final ChatbotService chatbotService;
 
-    // Injeção de dependência via construtor (melhor prática do Spring)
+    // Injeção de dependência via construtor (Melhor prática do ecossistema Spring)
     public ChatbotController(ChatbotService chatbotService) {
         this.chatbotService = chatbotService;
     }
 
-    // --- NOVA ROTA DE VALIDAÇÃO DA META (GET) ---
-    // A Meta faz uma requisição GET para testar se a URL é nossa mesmo
+    // --- ROTA DE VALIDAÇÃO DA META (GET) ---
+    // Atende o aperto de mão de segurança exigido pela API da Meta
     @GetMapping("/receber")
     public ResponseEntity<String> validarWebhook(
             @RequestParam("hub.mode") String mode,
             @RequestParam("hub.verify_token") String token,
             @RequestParam("hub.challenge") String challenge) {
 
-        // A mesma senha que vamos colocar lá no painel da Meta
-        String MEU_TOKEN_SECRETO = "pizza123";
+        String meuTokenSecreto = "pizza123";
 
-        if ("subscribe".equals(mode) && MEU_TOKEN_SECRETO.equals(token)) {
-            // Se a senha bater, devolvemos o código de verificação para a Meta
+        if ("subscribe".equals(mode) && meuTokenSecreto.equals(token)) {
+            // Se o token bater, o Spring devolve o challenge com status 200 OK
             return ResponseEntity.ok(challenge);
         } else {
-            // Se tentarem hackear a rota, bloqueamos com erro 403
+            // Bloqueio de segurança caso tentem acessar a URL diretamente
             return ResponseEntity.status(403).body("Falha na verificação de segurança");
         }
     }
 
-    // --- ROTA QUE RECEBE AS MENSAGENS (POST) ---
-    // Essa continua intacta, é onde os JSONs do WhatsApp vão chegar de verdade
+    // --- ROTA QUE RECEBE AS MENSAGENS REAL-TIME (POST) ---
+    // Agora processando o objeto complexo e aninhado vindo oficialmente do WhatsApp
     @PostMapping("/receber")
-    public ResponseEntity<String> receberMensagem(@RequestBody MensagemRequest request) {
-        // 1. Recebe o JSON do WhatsApp
-        // 2. Manda o texto para o Service processar
-        String respostaIA = chatbotService.processarMensagem(request.remetente(), request.texto());
+    public ResponseEntity<String> receberMensagem(@RequestBody MetaWebhookRequest request) {
+        try {
+            // Navegação segura pelas camadas do JSON da Meta (Entries -> Changes -> Value -> Messages)
+            if (request.entry() != null && !request.entry().isEmpty()) {
+                var entry = request.entry().get(0);
 
-        // 3. Retorna a resposta
-        return ResponseEntity.ok(respostaIA);
+                if (entry.changes() != null && !entry.changes().isEmpty()) {
+                    var change = entry.changes().get(0);
+                    var value = change.value();
+
+                    if (value.messages() != null && !value.messages().isEmpty()) {
+                        var messageObj = value.messages().get(0);
+
+                        // Extração limpa dos dados de negócio
+                        String remetente = messageObj.from(); // Número de telefone do cliente
+                        String textoMensagem = (messageObj.text() != null) ? messageObj.text().body() : "";
+
+                        // Delegação do processamento para a camada de serviço
+                        String respostaIA = chatbotService.processarMensagem(remetente, textoMensagem);
+
+                        // Retorna 200 OK imediatamente para a Meta não reenviar a mesma mensagem
+                        return ResponseEntity.ok(respostaIA);
+                    }
+                }
+            }
+
+            return ResponseEntity.ok("Evento recebido com sucesso, mas não continha mensagens de texto tratáveis.");
+
+        } catch (Exception e) {
+            // Tratamento preventivo e log estruturado
+            return ResponseEntity.status(500).body("Erro interno ao processar o payload da Meta.");
+        }
     }
 }
