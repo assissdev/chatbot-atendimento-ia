@@ -3,95 +3,121 @@ package com.example.chatbot_atendimento_ia.service;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
-
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class ChatbotService {
 
+    @Value("${meta.api.token}")
+    private String metaApiToken;
+
+    @Value("${meta.phone.id}")
+    private String metaPhoneId;
+
     @Value("${gemini.api.key}")
-    private String apiKey;
+    private String geminiApiKey;
 
-    @Value("${gemini.api.url}")
-    private String apiUrl;
+    // RestTemplate é o cliente HTTP padrão do Spring para fazer requisições
+    private final RestTemplate restTemplate = new RestTemplate();
 
-    // Nossa memória de curto prazo (Fichário de clientes). Chave: Número, Valor: Histórico da conversa
-    private final Map<String, String> memoriaConversa = new ConcurrentHashMap<>();
-
-    // Atenção: Adicionei o parâmetro 'remetente' aqui!
-    public String processarMensagem(String remetente, String mensagemDoCliente) {
-        RestTemplate restTemplate = new RestTemplate();
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-
-        // Resgata o histórico do cliente pelo número de telefone
-        String historicoAtual = memoriaConversa.getOrDefault(remetente, "Nenhuma interação anterior.");
-
-        // O seu prompt blindado continua igual
-        String contextoDeNegocio = """
-                Você é o atendente de elite de um delivery de Pizza Frita em Vila Velha, ES.
-                Seu objetivo é conduzir o cliente até o fechamento do pedido de forma 100% automatizada.
-                
-                FLUXO DE ATENDIMENTO (Você deve seguir exatamente nesta ordem, avançando um passo de cada vez):
-                PASSO 1 - SAUDAÇÃO E CARDÁPIO: Se o cliente apenas der oi, cumprimente de forma animada, envie o nosso cardápio completo e pergunte o que ele vai querer.
-                PASSO 2 - ANOTAÇÃO E UPSELL: Anote o que o cliente pediu. Se ele pediu só pizza, ofereça um refrigerante educadamente. Se pediu só bebida, pergunte qual pizza vai acompanhar.
-                PASSO 3 - RESUMO DO PEDIDO: Assim que o cliente disser que não quer mais nada, envie o resumo completo: itens escolhidos, a taxa de entrega (R$ 5,00) e o VALOR TOTAL da compra. Pergunte: "Posso confirmar o pedido?".
-                PASSO 4 - ENTREGA E PAGAMENTO: Somente após a confirmação do Passo 3, pergunte o endereço completo para entrega e se o pagamento será no Pix, Cartão ou Dinheiro.
-                PASSO 5 - DESPEDIDA: Quando o cliente passar o endereço e o pagamento, agradeça, diga que o pedido foi para a cozinha e informe o tempo médio de 30 a 40 minutos.
-                
-                CARDÁPIO OFICIAL:
-                - Pizza Frita Calabresa c/ Queijo: R$ 25,00
-                - Pizza Frita Marguerita: R$ 23,00
-                - Pizza Frita Frango c/ Catupiry: R$ 28,00
-                - Refrigerante Lata: R$ 6,00
-                
-                REGRAS DE SEGURANÇA:
-                - NUNCA avance um passo sem o cliente responder o anterior.
-                - NUNCA invente itens ou promoções. Venda apenas o que está no cardápio.
-                - Seja sempre curto e objetivo. Mensagens de WhatsApp não podem ser gigantes.
-                """;
-
-        // Aqui é a mágica da memória acontecendo: juntamos as regras, o passado e o presente
-        String promptFinal = contextoDeNegocio +
-                "\n\nHISTÓRICO DA CONVERSA:\n" + historicoAtual +
-                "\n\nCLIENTE AGORA DIZ: " + mensagemDoCliente +
-                "\nATENDENTE RESPONDERÁ:";
-
-        Map<String, Object> part = Map.of("text", promptFinal);
-        Map<String, Object> content = Map.of("parts", List.of(part));
-        Map<String, Object> requestBodyMap = Map.of("contents", List.of(content));
-
-        HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBodyMap, headers);
-
+    public String processarMensagem(String remetente, String textoUsuario) {
         try {
-            Map<String, Object> response = restTemplate.postForObject(apiUrl + "?key=" + apiKey, request, Map.class);
-            String respostaDaIA = extrairTextoDaResposta(response);
+            // 1. Pede para a IA gerar a resposta com base no que o cliente digitou
+            String respostaIA = consultarGemini(textoUsuario);
 
-            // Atualiza a ficha do cliente com essa nova troca de mensagens para a próxima rodada
-            String novoHistorico = historicoAtual + "\nCliente: " + mensagemDoCliente + "\nAtendente: " + respostaDaIA;
-            memoriaConversa.put(remetente, novoHistorico);
+            // 2. Envia a resposta gerada de volta para o WhatsApp do cliente
+            enviarParaWhatsApp(remetente, respostaIA);
 
-            return respostaDaIA;
-
+            return "Mensagem processada com sucesso";
         } catch (Exception e) {
-            System.err.println("Erro ao chamar o Gemini: " + e.getMessage());
-            return "Poxa, nosso chef virtual está ocupado fritando umas pizzas agora. Pode tentar de novo em um minuto?";
+            System.err.println("Erro no fluxo do Chatbot: " + e.getMessage());
+            return "Erro ao processar";
         }
     }
 
-    private String extrairTextoDaResposta(Map<String, Object> response) {
+    private String consultarGemini(String textoUsuario) {
+        String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + geminiApiKey;
+
+        // Aqui nós "programamos" o comportamento da IA.
+        // Damos o contexto do negócio para que ele não responda como um robô genérico.
+        String jsonRequest = """
+            {
+              "systemInstruction": {
+                "parts": [
+                  {
+                    "text": "Você é o atendente virtual de um delivery especializado em pizza frita localizado em Vila Velha, Espírito Santo. Seja sempre amigável, ágil e use emojis. Responda de forma curta e direta. Não invente sabores que não existem no cardápio."
+                  }
+                ]
+              },
+              "contents": [
+                {
+                  "parts": [
+                    {
+                      "text": "%s"
+                    }
+                  ]
+                }
+              ]
+            }
+            """.formatted(textoUsuario.replace("\"", "\\\""));
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<String> entity = new HttpEntity<>(jsonRequest, headers);
+
         try {
-            var candidates = (List<Map<String, Object>>) response.get("candidates");
-            var content = (Map<String, Object>) candidates.get(0).get("content");
-            var parts = (List<Map<String, Object>>) content.get("parts");
-            return (String) parts.get(0).get("text");
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, entity, String.class);
+            return extrairTextoDaRespostaGemini(response.getBody());
         } catch (Exception e) {
-            return "Desculpe, não entendi.";
+            System.err.println("Erro ao chamar Gemini: " + e.getMessage());
+            return "Poxa, tivemos um probleminha interno aqui! Já volto a te atender.";
         }
+    }
+
+    private void enviarParaWhatsApp(String numeroDestino, String textoMensagem) {
+        String url = "https://graph.facebook.com/v25.0/" + metaPhoneId + "/messages";
+
+        // JSON oficial da Meta para responder com texto simples
+        String jsonRequest = """
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": "%s",
+                "type": "text",
+                "text": {
+                    "preview_url": false,
+                    "body": "%s"
+                }
+            }
+            """.formatted(numeroDestino, textoMensagem.replace("\"", "\\\"").replace("\n", "\\n"));
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(metaApiToken);
+
+        HttpEntity<String> entity = new HttpEntity<>(jsonRequest, headers);
+
+        try {
+            restTemplate.exchange(url, HttpMethod.POST, entity, String.class);
+            System.out.println("✅ Mensagem enviada com sucesso para " + numeroDestino);
+        } catch (Exception e) {
+            System.err.println("❌ Erro ao enviar WhatsApp: " + e.getMessage());
+        }
+    }
+
+    // Método auxiliar simples para "pescar" o texto dentro do JSON complexo de resposta do Gemini
+    private String extrairTextoDaRespostaGemini(String jsonResponse) {
+        if (jsonResponse == null || !jsonResponse.contains("\"text\":")) {
+            return "Não consegui formular uma resposta.";
+        }
+        int startIndex = jsonResponse.indexOf("\"text\":") + 8;
+        int endIndex = jsonResponse.indexOf("\"", startIndex);
+
+        // Tratamento rápido para evitar quebras de linha quebrando o JSON da Meta
+        return jsonResponse.substring(startIndex, endIndex).replace("\\n", "\n");
     }
 }
